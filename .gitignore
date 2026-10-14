@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tgz
+*.zip
+*.log
+.DS_Store
+.env*
+coverage/
+.browser-*

@@ -1,0 +1,5 @@
+'use strict';
+// Execute the actual packed entrypoints against the real 1.10.3 IPC classes.
+const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const cp=require('node:child_process');const assert=require('node:assert/strict');
+const manifest=require('../package.json');const artifact=path.resolve(`${manifest.name}-${manifest.version}.tgz`);const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rancher-package-test-'));
+try{cp.execFileSync('tar',['-xzf',artifact,'-C',dir]);const packed=JSON.parse(fs.readFileSync(path.join(dir,'package/package.json'),'utf8'));assert.equal(packed.version,manifest.version);assert.equal(packed.name,manifest.name);assert.equal(packed.dependencies,undefined);cp.execFileSync(process.execPath,['--test','test/sdk-lifecycle.test.js'],{stdio:'inherit',env:{...process.env,PACKAGED_EXTENSION_DIR:path.join(dir,'package')}});console.log(`Packed ${packed.version} entrypoints passed actual SDK IPC/lifecycle smoke test`);}finally{fs.rmSync(dir,{recursive:true,force:true});}

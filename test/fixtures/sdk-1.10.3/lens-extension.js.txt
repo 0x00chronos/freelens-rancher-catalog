@@ -1,0 +1,134 @@
+/**
+ * Copyright (c) Freelens Authors. All rights reserved.
+ * Copyright (c) OpenLens Authors. All rights reserved.
+ * Licensed under MIT License. See LICENSE in root directory for more information.
+ */
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+import { disposer } from "@freelensapp/utilities";
+import { action, computed, makeObservable, observable } from "mobx";
+export const Disposers = Symbol("disposers");
+export class LensExtension {
+    id;
+    manifest;
+    manifestPath;
+    isBundled;
+    get sanitizedExtensionId() {
+        return sanitizeExtensionName(this.name);
+    }
+    /**
+     * @ignore
+     */
+    dependencies;
+    protocolHandlers = [];
+    _isEnabled = false;
+    get isEnabled() {
+        return this._isEnabled;
+    }
+    /**
+     * @ignore
+     */
+    [Disposers] = disposer();
+    constructor(deps, { id, manifest, manifestPath, isBundled }) {
+        this.dependencies = deps;
+        this.id = id;
+        this.manifest = manifest;
+        this.manifestPath = manifestPath;
+        this.isBundled = isBundled;
+        makeObservable(this);
+    }
+    get name() {
+        return this.manifest.name;
+    }
+    get version() {
+        return this.manifest.version;
+    }
+    get description() {
+        return this.manifest.description;
+    }
+    // Name of extension for persisting data
+    get storeName() {
+        return this.manifest.storeName || this.name;
+    }
+    /**
+     * getExtensionFileFolder returns the path to an already created folder. This
+     * folder is for the sole use of this extension.
+     *
+     * Note: there is no security done on this folder, only obfuscation of the
+     * folder name.
+     */
+    async getExtensionFileFolder() {
+        // storeName is read from the manifest and has a fallback to the manifest name, which equals id
+        return this.dependencies.ensureHashedDirectoryForExtension(this.storeName);
+    }
+    async enable() {
+        if (this._isEnabled) {
+            return;
+        }
+        this._isEnabled = true;
+        this.dependencies.logger.info(`[EXTENSION]: enabled ${this.name}@${this.version}`);
+    }
+    async disable() {
+        if (!this._isEnabled) {
+            return;
+        }
+        this._isEnabled = false;
+        try {
+            await this.onDeactivate();
+            this[Disposers]();
+            this.dependencies.logger.info(`[EXTENSION]: disabled ${this.name}@${this.version}`);
+        }
+        catch (error) {
+            this.dependencies.logger.error(`[EXTENSION]: disabling ${this.name}@${this.version} threw an error: ${error}`);
+        }
+    }
+    async activate() {
+        return this.onActivate();
+    }
+    onActivate() {
+        return;
+    }
+    onDeactivate() {
+        return;
+    }
+}
+__decorate([
+    observable,
+    __metadata("design:type", Object)
+], LensExtension.prototype, "_isEnabled", void 0);
+__decorate([
+    computed,
+    __metadata("design:type", Object),
+    __metadata("design:paramtypes", [])
+], LensExtension.prototype, "isEnabled", null);
+__decorate([
+    action,
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], LensExtension.prototype, "enable", null);
+__decorate([
+    action,
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], LensExtension.prototype, "disable", null);
+export function sanitizeExtensionName(name) {
+    return name.replace("@", "").replace("/", "--");
+}
+export function getSanitizedPath(...parts) {
+    return parts.filter(Boolean).join("/").replace(/\/+/g, "/").replace(/\/$/, "");
+} // normalize multi-slashes (e.g. coming from page.id)
+export function extensionDisplayName(name, version) {
+    return `${name}@${version}`;
+}
+export function getExtensionId(name) {
+    return `sidebar-item-${name}`;
+}
