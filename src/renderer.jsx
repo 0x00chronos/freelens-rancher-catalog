@@ -1,7 +1,6 @@
 'use strict';
-const React=global.React;
-const {Renderer}=global.LensExtensions;
-const {useState,useEffect}=React;
+const {React,Renderer}=globalThis.FreelensExtensionApi;
+const {useState,useEffect,useRef}=React;
 const {Input}=Renderer.Component;
 class RancherRendererIpc extends Renderer.Ipc {}
 let ipc;
@@ -26,9 +25,21 @@ function RancherPanel({preferences=false}){
  const [data,setData]=useState(null),[error,setError]=useState(''),[pending,setPending]=useState(false),[retry,setRetry]=useState(0);
  const [selected,setSelected]=useState(''),[token,setToken]=useState(''),[approved,setApproved]=useState(false),[filter,setFilter]=useState('');
  const [editor,setEditor]=useState(null),[name,setName]=useState(''),[url,setUrl]=useState(''),[ca,setCa]=useState(''),[newCa,setNewCa]=useState(false),[originApproved,setOriginApproved]=useState(false);
+ const [clusterEditor,setClusterEditor]=useState(null),[syncing,setSyncing]=useState(false);
  const [deleteId,setDeleteId]=useState(''),[refreshId,setRefreshId]=useState(''),[refreshApproved,setRefreshApproved]=useState(false);
- useEffect(()=>{let alive=true,timer;setError('');const load=()=>request('status').then(x=>{if(alive)setData(x);}).catch(e=>{clearInterval(timer);if(alive)setError(e.message);});timer=setInterval(load,2000);load();return()=>{alive=false;clearInterval(timer);};},[retry]);
- async function run(action,payload){setError('');setPending(true);try{const next=await request(action,payload);setData(next);if(next.selectedId){setSelected(next.selectedId);setToken('');setApproved(false);setRefreshId('');setRefreshApproved(false);}return next;}catch(e){setError(e.message);}finally{setPending(false);}}
+ const revision=useRef(0),running=useRef(0);
+ useEffect(()=>{
+  let alive=true,timer;
+  setError('');
+  const load=async()=>{
+   const current=revision.current;
+   try{const next=await request('status');if(alive&&current===revision.current&&!running.current)setData(next);}
+   catch(e){if(alive&&current===revision.current&&!running.current)setError(e.message);}
+   finally{if(alive)timer=setTimeout(load,2000);}
+  };
+  load();return()=>{alive=false;clearTimeout(timer);};
+ },[retry]);
+ async function run(action,payload){if(running.current&&action!=='cancel')return;running.current++;if(action==='sync')setSyncing(true);const current=++revision.current;setError('');setPending(true);try{const next=await request(action,payload);if(current!==revision.current)return;setData(next);if(next.selectedId){setSelected(next.selectedId);setToken('');setApproved(false);setRefreshId('');setRefreshApproved(false);}return next;}catch(e){if(current===revision.current)setError(e.message);}finally{if(action==='sync')setSyncing(false);running.current--;setPending(running.current>0);}}
  const id=data?.servers.some(s=>s.id===selected)?selected:data?.servers[0]?.id||'';
  const server=data?.servers.find(s=>s.id===id);const busy=pending||data?.busy;
  const currentRecords=data?.records.filter(r=>r.serverId===id)||[];
@@ -36,8 +47,19 @@ function RancherPanel({preferences=false}){
  let originChanged=false;try{originChanged=!!editServer&&new URL(url).origin!==new URL(editServer.url).origin;}catch{originChanged=!!editServer&&url!==editServer.url;}
  const showEditor=!!editor||!!data&&!data.servers.length;
  function beginEditor(mode){setEditor(mode);setName(mode==='edit'?server.name:'');setUrl(mode==='edit'?server.url:'');setCa(mode==='edit'?server.ca:'');setNewCa(false);setOriginApproved(false);setDeleteId('');setError('');}
- function selectServer(value){setSelected(value);setToken('');setApproved(false);setRefreshId('');setEditor(null);setDeleteId('');setError('');}
- function openCluster(record,context){const entity=[...Renderer.Catalog.catalogEntities.entities.values()].find(e=>e.metadata.source==='Rancher'&&e.spec?.kubeconfigPath===record.kubeconfigPath&&e.spec?.kubeconfigContext===context);if(!entity){setError('Catalog 尚未完成更新，请稍后重试。');return;}Renderer.Navigation.navigate(`/cluster/${encodeURIComponent(entity.getId())}`);}
+ function selectServer(value){setClusterEditor(null);setFilter('');setSelected(value);setToken('');setApproved(false);setRefreshId('');setEditor(null);setDeleteId('');setError('');}
+ async function openCluster(record,context,settings=false){
+  setError('');
+  try{
+   const clusters=Renderer.Catalog.getAllClusters();
+   const entity=record.nativeKubeconfigPath&&clusters.find(c=>c.kubeConfigPath===record.nativeKubeconfigPath&&c.contextName===context);
+   if(!entity){setError('尚未导入 FreeLens。请先将下方的目录添加到 Kubeconfig Syncs，然后重试。');return;}
+   const id=encodeURIComponent(entity.id);
+   // Same native settings route used by the FreeLens Catalog action in 2.0/2.1.
+   await Renderer.Navigation.navigate(settings?`/entity/${id}/settings`:`/cluster/${id}`);
+  }catch{setError(settings?'无法打开集群设置，请从 FreeLens 原生 Catalog 的 Settings 重试。':'无法打开集群，请从 FreeLens 原生 Catalog 重试。');}
+ }
+
  return <div data-testid="rancher-panel" style={{padding:preferences?0:24,width:'100%',maxWidth:1120,margin:preferences?0:'0 auto',boxSizing:'border-box',color:'var(--textColorPrimary)'}}>
   {!preferences&&<h1 style={{fontSize:24,margin:'0 0 8px'}}>Rancher Catalog</h1>}
   <p style={styles.hint}>统一管理 Rancher 集群连接。同步默认复用本地 kubeconfig，不轮换现有凭据。</p>
@@ -62,16 +84,33 @@ function RancherPanel({preferences=false}){
     <div style={{...styles.toolbar,justifyContent:'space-between'}}><strong>认证与同步</strong><span style={styles.hint}>{server.hasToken?'API Token 已设置 · 仅本次会话':'未设置 API Token'}</span></div>
     <div style={{...styles.toolbar,alignItems:'center'}}><div style={{flex:'1 1 320px'}}><Input aria-label="Rancher API Token" type="password" autoComplete="off" spellCheck={false} style={{...styles.input,marginBottom:0}} value={token} onChange={setToken} placeholder={server.hasToken?'输入 Token 以替换当前会话凭据':'token-xxxxx:secret'} /></div><Button disabled={busy||!token} onClick={async()=>{const secret=token;setToken('');await run('token',{id,token:secret});}}>设置 Token</Button><Button disabled={busy||!server.hasToken} onClick={()=>run('clear-token',{id})}>清除 Token</Button></div>
     <label style={{display:'block',fontSize:12,lineHeight:1.6,margin:'14px 0'}}><input type="checkbox" checked={approved} disabled={busy} onChange={e=>setApproved(e.target.checked)} /> 允许向 {server.url} 请求缺失的访问凭据并保存在本机。Rancher 可能创建新 Token。</label>
-    <div style={styles.toolbar}><Button disabled={busy||!approved||!server.hasToken} onClick={()=>{setApproved(false);run('sync',{id,approved:true});}}>同步集群</Button>{data.busy&&<Button onClick={()=>run('cancel')}>取消同步</Button>}<span role="status" style={styles.hint}>{busy?'处理中…':`${currentRecords.length} 个集群 · 默认复用已有凭据`}</span></div>
+    <div style={styles.toolbar}><Button disabled={busy||!approved||!server.hasToken} onClick={()=>{setApproved(false);run('sync',{id,approved:true});}}>同步集群</Button>{(data.busy||syncing)&&<Button onClick={()=>run('cancel')}>取消同步</Button>}<span role="status" style={styles.hint}>{busy?'处理中…':`${currentRecords.length} 个集群 · 默认复用已有凭据`}</span></div>
     {data.message&&<details style={{marginTop:10}} open={data.summary?.failed>0}><summary style={{fontSize:12}}>{data.summary?`同步结果：更新 ${data.summary.updated} · 复用 ${data.summary.reused} · 失败 ${data.summary.failed}`:'操作结果'}</summary><p role="status" style={{...styles.hint,whiteSpace:'pre-wrap'}}>{data.message}</p></details>}
    </section>}
    <section style={styles.section} aria-label="集群目录"><div style={{...styles.toolbar,justifyContent:'space-between'}}><strong>集群目录 · {currentRecords.length}</strong><span style={styles.hint}>当前实例</span></div><Input style={styles.input} aria-label="筛选集群" placeholder="搜索集群名称或 ID" value={filter} onChange={setFilter} />
+    {data.syncPath&&<details style={styles.notice} open={!currentRecords.length||undefined}>
+      <summary>首次设置：将同步目录添加到 FreeLens</summary>
+      <p style={styles.hint}>打开 Preferences → Kubernetes → Kubeconfig Syncs，将以下文件夹添加一次。之后 FreeLens 会自动发现该目录中的 kubeconfig。不要添加存储归档的上级目录。</p>
+      <code style={{overflowWrap:'anywhere',userSelect:'text'}}>{data.syncPath}</code>
+    </details>}
     {!currentRecords.length&&<p style={styles.hint}>暂无集群。添加实例并同步后，可在此连接。</p>}
-    {currentRecords.filter(r=>`${r.name} ${r.clusterId}`.toLowerCase().includes(filter.toLowerCase())).map(r=><article key={r.key} style={{padding:'12px 0',borderBottom:'1px solid var(--borderColor)'}}>
-      <div style={{...styles.toolbar,justifyContent:'space-between'}}><div><strong>{r.name}</strong><span style={{...styles.hint,marginLeft:10}}>{r.clusterId}</span></div><Button disabled={busy||!server?.hasToken} onClick={()=>{setRefreshId(r.clusterId);setRefreshApproved(false);}}>刷新凭据</Button></div>
+    {currentRecords.filter(r=>`${r.name} ${r.rancherName||''} ${r.clusterId}`.toLowerCase().includes(filter.toLowerCase())).map(r=><article key={r.key} style={{padding:'12px 0',borderBottom:'1px solid var(--borderColor)'}}>
+      <div style={{...styles.toolbar,justifyContent:'space-between'}}><div><strong>{r.name}</strong><span style={{...styles.hint,marginLeft:10}}>{r.clusterId}</span></div><div style={styles.toolbar}><Button disabled={busy} onClick={()=>{setRefreshId('');setClusterEditor({key:r.key,name:r.displayName||''});setError('');}}>修改插件显示名</Button><Button disabled={busy||!server?.hasToken} onClick={()=>{setClusterEditor(null);setRefreshId(r.clusterId);setRefreshApproved(false);}}>刷新凭据</Button></div></div>
       <p style={{...styles.hint,margin:'4px 0 8px'}}>状态：{r.state||'未知'} · 配置更新：{new Date(r.updatedAt).toLocaleString()}{r.stale?' · 本次发现未返回，保留已有配置':''}</p>
       {r.available===false&&<p role="alert" style={styles.hint}>本地配置缺失或校验失败。同步或刷新此集群以修复。</p>}
-      <div style={styles.toolbar}>{r.contexts.map(c=><Button key={c} onClick={()=>openCluster(r,c)}>连接：{c}</Button>)}</div>
+      <div style={styles.toolbar}>{r.contexts.map(c=><div key={c} style={styles.toolbar} role="group" aria-label={`上下文：${c}`}>
+        <Button disabled={r.available===false} onClick={()=>openCluster(r,c)}>连接：{c}</Button>
+        <Button disabled={r.available===false} aria-label={`集群设置：${c}`} onClick={()=>openCluster(r,c,true)}>{r.contexts.length>1?`集群设置：${c}`:'集群设置'}</Button>
+      </div>)}</div>
+      {clusterEditor?.key===r.key&&<form aria-label="编辑已同步集群" style={styles.notice} onSubmit={async e=>{
+        e.preventDefault();
+        if(busy)return;
+        if(await run('edit-cluster',{key:r.key,name:clusterEditor.name}))setClusterEditor(null);
+      }}>
+        <label style={styles.label}>显示名称<Input aria-label="集群显示名称" maxLength={100} disabled={busy} value={clusterEditor.name} placeholder={r.rancherName||r.name} onChange={value=>setClusterEditor(current=>current?.key===r.key?{...current,name:value}:current)} /></label>
+        <p style={styles.hint}>留空恢复 Rancher 原名。仅修改本地显示名称，不改 kubeconfig、上下文或凭据。</p>
+        <div style={styles.toolbar}><Button type="submit" disabled={busy}>保存集群</Button><Button disabled={busy} onClick={()=>setClusterEditor(null)}>取消编辑</Button></div>
+      </form>}
       {refreshId===r.clusterId&&<div role="dialog" aria-label="刷新凭据确认" style={styles.notice}><label><input type="checkbox" checked={refreshApproved} disabled={busy} onChange={e=>setRefreshApproved(e.target.checked)} /> 确认仅重新生成“{r.name}”的 kubeconfig。这可能新增 Token；不会撤销旧凭据。</label><div style={{...styles.toolbar,marginTop:10}}><Button disabled={busy||!refreshApproved} onClick={async()=>{setRefreshApproved(false);const result=await run('sync',{id,approved:true,refresh:true,clusterIds:[r.clusterId]});if(result)setRefreshId('');}}>确认刷新</Button><Button disabled={busy} onClick={()=>setRefreshId('')}>取消</Button></div></div>}
     </article>)}
    </section>
@@ -88,4 +127,4 @@ class RancherRendererExtension extends Renderer.LensExtension{
  onActivate(){ipc=RancherRendererIpc.createInstance(this);}
  onDeactivate(){ipc=undefined;}
 }
-module.exports={default:RancherRendererExtension};
+export default RancherRendererExtension;

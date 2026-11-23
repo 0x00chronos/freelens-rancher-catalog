@@ -18,4 +18,4 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm pack
-      - run: node scripts/test-package.js freelens-rancher-catalog-1.0.0.tgz
+      - run: node scripts/test-package.js

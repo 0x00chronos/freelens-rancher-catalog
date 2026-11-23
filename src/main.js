@@ -1,28 +1,24 @@
 'use strict';
-const { Main, Common } = global.LensExtensions;
-const {observable,runInAction}=global.Mobx;
+const {Main}=globalThis.FreelensExtensionApi;
 const {Service}=require('./service');
-const {SafeError}=require('./core');
+const {SafeError,sanitizeKubeconfig}=require('./core');
 const path=require('node:path');
+const fs=require('node:fs/promises');
+const {randomUUID}=require('node:crypto');
+const managedFile=/^[a-f0-9]{64}\.yaml$/;
 class RancherMainIpc extends Main.Ipc {}
 class RancherCatalogExtension extends Main.LensExtension {
-  constructor(...args) {
-    super(...args);
-    this.entities=observable.array([],{deep:false});
-    this.appMenus=[{parentId:'file',label:'Rancher Catalog',click:()=>this.navigate('rancher-catalog')}];
-  }
   async onActivate() {
-    this.service=new Service(path.join(await this.getExtensionFileFolder(),'rancher-catalog-v1'),(records,servers)=>{
-      const entities=records.filter(r=>r.available!==false).flatMap(r=>r.contexts.map(context=>new Common.Catalog.KubernetesCluster({
-        metadata:{uid:`rancher-${r.key}-${require('node:crypto').createHash('sha256').update(context).digest('hex')}`, name:`${r.name}${r.contexts.length>1 ? ` / ${context}` : ''}`,source:'Rancher',labels:{'rancher/server':servers.find(s=>s.id===r.serverId)?.name || r.serverId,'rancher/cluster-id':r.clusterId,'rancher/stale':String(r.stale)}},
-        spec:{kubeconfigPath:this.service.configPath(r.key),kubeconfigContext:context},status:{phase:'disconnected'}
-      })));
-      runInAction(()=>{
-        const previous=new Map(this.entities.map(entity=>[entity.metadata.uid,entity]));
-        this.entities.replace(entities.map(entity=>{const old=previous.get(entity.metadata.uid);if(!old)return entity;old.metadata=entity.metadata;old.spec=entity.spec;return old;}));
-      });
-    });
-    await this.service.init(); this.addCatalogSource('rancher-catalog',this.entities);
+    // Keep the previous store name and data schema; FreeLens owns the hashed parent.
+    this.service=new Service(path.join(await this.getExtensionFileFolder(),'rancher-catalog-v1'),()=>{});
+    await this.service.init();
+    this.syncPath=path.join(this.service.root,'native-kubeconfigs');
+    await fs.mkdir(this.syncPath,{mode:0o700}).catch(e=>{if(e.code!=='EEXIST')throw e;});
+    if(!(await fs.lstat(this.syncPath)).isDirectory())throw new SafeError('FreeLens 同步目录不安全');
+    await fs.chmod(this.syncPath,0o700);
+    this.projections=Promise.resolve();
+    this.nativePaths=new Map();
+    await this.projectNative();
     const ipc=RancherMainIpc.createInstance(this);
     ipc.handle('request',async (_event,action,payload={})=>{
       try {
@@ -31,6 +27,7 @@ class RancherCatalogExtension extends Main.LensExtension {
           case 'status':data=this.service.snapshot();break;
           case 'add':data=await this.service.addServer(payload);break;
           case 'edit':data=await this.service.editServer(payload.id,payload,payload.confirmOriginChange===true);break;
+          case 'edit-cluster':data=await this.service.editCluster(payload.key,payload);break;
           case 'archive':data=await this.service.archiveServer(payload.id,payload.approved===true);break;
           case 'restore':data=await this.service.restoreServer(payload.id);break;
           case 'token':data=this.service.setToken(payload.id,payload.token);break;
@@ -39,10 +36,47 @@ class RancherCatalogExtension extends Main.LensExtension {
           case 'cancel':data=this.service.cancel();break;
           default:throw new SafeError('未知操作');
         }
-        return {ok:true,data};
-      }catch(e){const error=e instanceof SafeError ? e.message : '操作失败；已有配置保留，请检查插件目录权限';if(action==='sync')this.service.message=error;return {ok:false,error};}
+        if(['edit','archive','restore','sync'].includes(action)){
+          await this.projectNative();
+          data={...data,...this.service.snapshot()};
+        }
+        return {ok:true,data:{...data,syncPath:this.syncPath,records:data.records.map(r=>({...r,nativeKubeconfigPath:this.nativePaths.get(r.key)}))}};
+      }catch(e){const error=e instanceof SafeError ? e.message : '操作失败；请检查插件数据与 FreeLens 同步目录权限';if(action==='sync')this.service.message=error;return {ok:false,error};}
     });
   }
-  onDeactivate(){this.service?.deactivate();this.removeCatalogSource('rancher-catalog');runInAction(()=>this.entities.clear());}
+  projectNative() {
+    // Only the native kubeconfig watcher registers real, proxy-backed clusters.
+    const update=this.projections.catch(()=>{}).then(async()=>{
+      const active=new Map();
+      for(const r of this.service.snapshot().records){
+        if(r.available===false)continue;
+        const source=this.service.configPath(r.key);
+        const stat=await fs.lstat(source);
+        if(!stat.isFile()||stat.isSymbolicLink())throw new SafeError('保存的 kubeconfig 路径不安全');
+        const config=sanitizeKubeconfig(await fs.readFile(source,'utf8')).text;
+        const dest=path.join(this.syncPath,`${r.key}.yaml`);
+        let previous;
+        try{
+          if(!(await fs.lstat(dest)).isFile())throw new SafeError('FreeLens kubeconfig 路径不安全');
+          previous=await fs.readFile(dest,'utf8');await fs.chmod(dest,0o600);
+        }catch(e){if(e.code!=='ENOENT')throw e;}
+        if(previous!==config){
+          // Stage outside the watched folder so the temporary file cannot create duplicate clusters.
+          const tmp=path.join(this.service.root,`native-${randomUUID()}.tmp`);
+          try{await fs.writeFile(tmp,config,{flag:'wx',mode:0o600});await fs.rename(tmp,dest);}
+          finally{await fs.unlink(tmp).catch(()=>{});}
+        }
+        active.set(r.key,dest);
+      }
+      const activeFiles=new Set([...active.values()].map(p=>path.basename(p)));
+      for(const entry of await fs.readdir(this.syncPath,{withFileTypes:true})){
+        if(managedFile.test(entry.name)&&!activeFiles.has(entry.name)&&entry.isFile())await fs.unlink(path.join(this.syncPath,entry.name));
+      }
+      this.nativePaths=active;
+    });
+    this.projections=update;
+    return update;
+  }
+  onDeactivate(){this.service?.deactivate();}
 }
 module.exports={default:RancherCatalogExtension};

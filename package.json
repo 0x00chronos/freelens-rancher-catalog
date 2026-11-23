@@ -1,16 +1,17 @@
 {
   "name": "freelens-rancher-catalog",
-  "version": "1.0.0",
+  "version": "2.0.1",
   "description": "Manage Rancher instances and synchronize reusable Kubernetes credentials with Freelens Catalog",
   "main": "dist/main.js",
-  "renderer": "dist/renderer.js",
+  "renderer": "dist/renderer.mjs",
   "engines": {
-    "freelens": "^1.10.0",
+    "freelens": "^2.0.0",
     "node": ">=22"
   },
   "license": "MIT",
   "files": [
-    "dist",
+    "dist/main.js",
+    "dist/renderer.mjs",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.txt"
@@ -23,15 +24,14 @@
     "pretest": "npm run build"
   },
   "devDependencies": {
+    "@freelensapp/extensions": "2.1.0",
     "esbuild": "0.25.12",
     "jsdom": "26.1.0",
-    "mobx": "6.13.7",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "react-test-renderer": "18.3.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "yaml": "2.9.1"
   },
-  "freelensSdkVersion": "1.10.3",
+  "freelensSdkVersion": "2.1.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/0x00chronos/freelens-rancher-catalog.git"
